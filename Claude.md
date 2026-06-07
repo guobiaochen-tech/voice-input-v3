@@ -296,4 +296,3 @@ TextInputService.pasteText(text)
 | 用途 | 文件路径 |
 |------|----------|
 | v2 可复用代码 | /Users/paul/voice-input-v2/Sources/VoiceInput/ |
-| 竞品参考 | /tmp/typeoff-src/（已不存在） |
