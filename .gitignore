@@ -1,0 +1,27 @@
+# Build
+.build/
+
+# App bundle & DMG
+VoiceInput.app/
+*.dmg
+
+# Frameworks & large binaries
+Frameworks/
+logo.icns
+
+# Backup files
+*.bak.jpg
+*.bak.png
+
+# Config & secrets
+config.json
+.env
+
+# User data
+recordings/
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
