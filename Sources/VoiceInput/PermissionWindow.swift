@@ -19,7 +19,8 @@ enum PermissionChecker {
     static func openAccessibility() {
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         let opts = [key: true] as CFDictionary
-        AXIsProcessTrustedWithOptions(opts)
+        _ = AXIsProcessTrustedWithOptions(opts)
+        openAccessibilitySettings()
     }
 
     static func openMicrophone() {
@@ -35,6 +36,14 @@ enum PermissionChecker {
         // 打开系统设置 → 隐私与安全性
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy") {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    static func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        } else {
+            openSystemSettings()
         }
     }
 }
@@ -133,7 +142,7 @@ class PermissionViewController: NSViewController {
 
         view = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor(white: 0.09, alpha: 1).cgColor
+        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
         var curY = H - padTop
 
@@ -146,19 +155,20 @@ class PermissionViewController: NSViewController {
            let image = NSImage(contentsOf: url) {
             image.size = NSSize(width: iconSize, height: iconSize)
             iconView.image = image
-            iconView.contentTintColor = NSColor(white: 0.9, alpha: 1)
+            iconView.contentTintColor = .labelColor
         }
         view.addSubview(iconView)
 
         // 标题
         curY -= iconTitleGap + 20
-        addCenteredLabel("Voice Input V3.3", fontSize: 16, weight: .semibold, color: .white, y: curY)
+        let appVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "3.5"
+        addCenteredLabel("Voice Input V\(appVersion)", fontSize: 16, weight: .semibold, color: .labelColor, y: curY)
 
         // 分割线
         curY -= titleLineGap + 1
         let line = NSView(frame: NSRect(x: 24, y: curY, width: W - 48, height: 1))
         line.wantsLayer = true
-        line.layer?.backgroundColor = NSColor(white: 0.2, alpha: 1).cgColor
+        line.layer?.backgroundColor = NSColor.separatorColor.cgColor
         view.addSubview(line)
 
         // 辅助功能卡片
@@ -251,23 +261,23 @@ class PermissionViewController: NSViewController {
 
         let card = NSView(frame: NSRect(x: 24, y: y, width: cardW, height: cardH))
         card.wantsLayer = true
-        card.layer?.backgroundColor = NSColor(white: 0.15, alpha: 1).cgColor
+        card.layer?.backgroundColor = NSColor.underPageBackgroundColor.cgColor
         card.layer?.cornerRadius = 12
-        card.layer?.borderColor = NSColor(white: 0.22, alpha: 1).cgColor
+        card.layer?.borderColor = NSColor.separatorColor.cgColor
         card.layer?.borderWidth = 1
 
         // 图标（SF Symbol）
         let iconConfig = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
         let icon = NSImageView(frame: NSRect(x: 14, y: cardH - 28, width: 20, height: 20))
         icon.image = NSImage(systemSymbolName: iconName, accessibilityDescription: title)
-        icon.contentTintColor = NSColor(white: 0.6, alpha: 1)
+        icon.contentTintColor = .secondaryLabelColor
         icon.symbolConfiguration = iconConfig
         card.addSubview(icon)
 
         // 标题
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
-        titleLabel.textColor = .white
+        titleLabel.textColor = .labelColor
         titleLabel.sizeToFit()
         titleLabel.frame = NSRect(x: 40, y: cardH - 28, width: 200, height: titleLabel.frame.height)
         card.addSubview(titleLabel)
@@ -275,7 +285,7 @@ class PermissionViewController: NSViewController {
         // 描述
         let descLabel = NSTextField(wrappingLabelWithString: desc)
         descLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
-        descLabel.textColor = NSColor(white: 0.55, alpha: 1)
+        descLabel.textColor = .secondaryLabelColor
         descLabel.frame = NSRect(x: 14, y: 38, width: cardW - 28, height: 40)
         card.addSubview(descLabel)
 

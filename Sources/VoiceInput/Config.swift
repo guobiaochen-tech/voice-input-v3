@@ -2,43 +2,52 @@ import Foundation
 
 // MARK: - 数据目录
 
-/// 所有数据统一存放在 ~/.voice-input/
-let appDataDir: String = NSHomeDirectory() + "/.voice-input"
+/// 数据目录固定在 ~/.voice-input/（家目录点目录，与 Claude Code 等开发工具同路子，好找好编辑）
+let appDataDir: String = {
+    let env = ProcessInfo.processInfo.environment
+
+    if let override = env["VOICE_INPUT_DATA_DIR"], !override.isEmpty {
+        return (override as NSString).expandingTildeInPath
+    }
+
+    return NSHomeDirectory() + "/.voice-input"
+}()
 
 /// 确保数据目录存在，返回目录路径
-/// 首次运行时自动从 ~/voice-input-v2/ 迁移旧数据
+/// 首次运行时自动从旧位置（项目目录 / ~/.voice-input / ~/voice-input-v2）迁移数据
 func ensureAppDataDir() -> String {
     let fm = FileManager.default
     try? fm.createDirectory(atPath: appDataDir, withIntermediateDirectories: true)
 
-    // 一次性迁移旧目录数据
-    let oldDir = NSHomeDirectory() + "/voice-input-v2"
-    let marker = appDataDir + "/.migrated"
-    if fm.fileExists(atPath: oldDir) && !fm.fileExists(atPath: marker) {
-        for item in ["config.json", ".env", "transcriber.log", "streamer.log", "recordings"] {
-            let src = oldDir + "/" + item
-            let dst = appDataDir + "/" + item
-            if fm.fileExists(atPath: src) && !fm.fileExists(atPath: dst) {
-                try? fm.moveItem(atPath: src, toPath: dst)
+    // 迁移源按"新→旧"顺序：新数据先占位，旧数据只补缺（目标已存在则跳过，永不覆盖）。
+    // 全部用 copy 保留源，避免迁移中途失败丢数据。
+    let sources: [(path: String, marker: String)] = [
+        (NSHomeDirectory() + "/Library/Application Support/VoiceInput", ".migrated-appsupport"),
+        (NSHomeDirectory() + "/voice-input-v3/.voice-input", ".migrated-project"),
+        (NSHomeDirectory() + "/voice-input-v2", ".migrated"),
+    ]
+    let items = ["config.json", ".env", "polish-prompt.md", "transcriber.log", "streamer.log", "recordings", "models", "prompts"]
+
+    for (src, marker) in sources {
+        let markerPath = appDataDir + "/" + marker
+        guard src != appDataDir, fm.fileExists(atPath: src), !fm.fileExists(atPath: markerPath) else { continue }
+        for item in items {
+            let s = src + "/" + item
+            let d = appDataDir + "/" + item
+            if fm.fileExists(atPath: s) && !fm.fileExists(atPath: d) {
+                try? fm.copyItem(atPath: s, toPath: d)
             }
         }
-        fm.createFile(atPath: marker, contents: nil)
+        fm.createFile(atPath: markerPath, contents: nil)
+        NSLog("[VI] 已从 \(src) 复制数据到 \(appDataDir)")
     }
 
-    // 一次性从 Library 旧目录迁移到 ~/.voice-input/
-    let libraryDir = NSSearchPathForDirectoriesInDomains(.applicationSupportDirectory, .userDomainMask, true).first!
-        .appending("/VoiceInput")
-    let libMarker = appDataDir + "/.migrated-lib"
-    if fm.fileExists(atPath: libraryDir) && !fm.fileExists(atPath: libMarker) {
-        for item in ["config.json", ".env", "recordings", "models"] {
-            let src = libraryDir + "/" + item
-            let dst = appDataDir + "/" + item
-            if fm.fileExists(atPath: src) && !fm.fileExists(atPath: dst) {
-                try? fm.moveItem(atPath: src, toPath: dst)
-            }
-        }
-        fm.createFile(atPath: libMarker, contents: nil)
-        NSLog("[VI] 已从 \(libraryDir) 迁移到 \(appDataDir)")
+    // polish-prompt.md 统一挪进 prompts/ 子目录（所有提示词归一处）
+    let oldPP = appDataDir + "/polish-prompt.md"
+    let newPP = appDataDir + "/prompts/polish-prompt.md"
+    if fm.fileExists(atPath: oldPP) && !fm.fileExists(atPath: newPP) {
+        try? fm.createDirectory(atPath: appDataDir + "/prompts", withIntermediateDirectories: true)
+        try? fm.moveItem(atPath: oldPP, toPath: newPP)
     }
     return appDataDir
 }
@@ -53,18 +62,62 @@ struct AppConfig {
     var asrMode: String = "cloud"                // cloud, local
     var localModel: String = "sensevoice-small"  // 本地模型目录名
 
-    // 润色
-    var polishEnabled: Bool = true
-    var polishType: String = "cloud"             // cloud, local
+    // 润色模式：off 关闭 / polish 基本润色 / style 风格改写 / translate 翻译
+    var polishMode: String = "polish"
+    var polishType: String = "cloud"             // cloud, local（保留兼容，UI 不再显示）
     var polishApiUrl: String = "https://api.deepseek.com/chat/completions"
     var polishApiKey: String = ""
     var polishModel: String = "deepseek-v4-flash"
+    var polishReplyStyle: String = "高情商"        // 风格 md 文件名（动态扫描 prompts/styles/）
+    var translateLang: String = "英文"            // 翻译语言 md 文件名（动态扫描 prompts/translate/）
 
     // 通用
     var hotkey: String = "cmd_r"
     var saveRecordings: Bool = false
     var cjkSpacing: Bool = true                  // 中日韩字符与英文/数字之间加空格
     var soundEnabled: Bool = true                 // 录音开始/结束提示音
+
+    // 服务商预设：用户下拉框选项 + 各自的 key（用户要求持久化 key）
+    var llmPresets: [ProviderPreset] = ProviderPreset.defaultLLM
+    var asrPresets: [AsrPreset] = AsrPreset.defaultASR
+}
+
+// MARK: - 服务商预设
+
+/// LLM 服务商预设：存 name + api_url + model + key
+/// 用户选预设自动填好前三项，key 每家单独保存，切换服务商不用重填。
+/// 用户手填了预设之外的值，会作为新条目追加进数组（历史）。
+struct ProviderPreset: Codable, Equatable {
+    var name: String
+    var apiUrl: String
+    var model: String
+    var apiKey: String
+    var isBuiltin: Bool   // 内置预设（不可改名/删字段），区分用户历史条目
+
+    static let defaultLLM: [ProviderPreset] = [
+        ProviderPreset(name: "DeepSeek", apiUrl: "https://api.deepseek.com/chat/completions", model: "deepseek-chat", apiKey: "", isBuiltin: true),
+        ProviderPreset(name: "Kimi (Moonshot)", apiUrl: "https://api.moonshot.cn/v1/chat/completions", model: "moonshot-v1-8k", apiKey: "", isBuiltin: true),
+        ProviderPreset(name: "MiniMax", apiUrl: "https://api.minimax.io/v1/chat/completions", model: "MiniMax-Text-01", apiKey: "", isBuiltin: true),
+        ProviderPreset(name: "MiMo (小米)", apiUrl: "", model: "MiMo-7B-RL", apiKey: "", isBuiltin: true),
+        ProviderPreset(name: "Qwen (通义)", apiUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", model: "qwen-max", apiKey: "", isBuiltin: true),
+        ProviderPreset(name: "火山 Doubao", apiUrl: "https://ark.cn-beijing.volces.com/api/v3/chat/completions", model: "doubao-pro-32k", apiKey: "", isBuiltin: true),
+        ProviderPreset(name: "自定义", apiUrl: "", model: "", apiKey: "", isBuiltin: true),
+    ]
+}
+
+/// 云端 ASR 服务商预设
+struct AsrPreset: Codable, Equatable {
+    var name: String
+    var provider: String   // dashscope / tencent / xfyun
+    var apiKey: String
+    var implemented: Bool  // 是否已接入（false = 占位，后续版本更新）
+    var isBuiltin: Bool
+
+    static let defaultASR: [AsrPreset] = [
+        AsrPreset(name: "阿里云 DashScope", provider: "dashscope", apiKey: "", implemented: true, isBuiltin: true),
+        AsrPreset(name: "腾讯云 ASR", provider: "tencent", apiKey: "", implemented: false, isBuiltin: true),
+        AsrPreset(name: "讯飞星火 ASR", provider: "xfyun", apiKey: "", implemented: false, isBuiltin: true),
+    ]
 }
 
 // 兼容旧版字段名
@@ -113,11 +166,29 @@ extension AppConfig {
         asrMode = dict["asr_mode"] ?? "cloud"
         localModel = dict["local_model"] ?? "sensevoice-small"
 
-        polishEnabled = dict["polish_enabled"] != "false"
+        // polish_mode 迁移：旧配置只有 polish_enabled 布尔；style 模式已废弃，降级为润色
+        if let mode = dict["polish_mode"], !mode.isEmpty {
+            polishMode = mode == "style" ? "polish" : mode
+        } else {
+            polishMode = dict["polish_enabled"] == "false" ? "off" : "polish"
+        }
         polishType = dict["polish_type"] ?? "cloud"
         polishApiUrl = dict["polish_api_url"] ?? dict["deepseek_api_url"] ?? "https://api.deepseek.com/chat/completions"
         polishApiKey = env["POLISH_API_KEY"] ?? dict["polish_api_key"] ?? dict["deepseek_api_key"] ?? ""
         polishModel = dict["polish_model"] ?? dict["deepseek_model"] ?? "deepseek-v4-flash"
+        polishReplyStyle = dict["polish_reply_style"] ?? "高情商"
+        translateLang = dict["translate_lang"] ?? "英文"
+
+        // 预设列表：缺失时用内置默认；存在时解码（保留用户的历史条目和 key）
+        if let data = dict["llm_presets"]?.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([ProviderPreset].self, from: data) {
+            // 合并：以内置默认为骨架，用磁盘里的 key/历史覆盖
+            llmPresets = Self.mergeLLMPresets(saved: decoded)
+        }
+        if let data = dict["asr_presets"]?.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([AsrPreset].self, from: data) {
+            asrPresets = Self.mergeASRPresets(saved: decoded)
+        }
 
         hotkey = dict["hotkey"] ?? "cmd_r"
         saveRecordings = dict["save_recordings"] == "true"
@@ -227,19 +298,30 @@ class ConfigManager {
 extension AppConfig {
     func save(to path: String) {
         // config.json 不存 API Key，只存非敏感配置
-        let dict: [String: String] = [
+        var dict: [String: String] = [
             "asr_engine": asrEngine,
             "asr_provider": asrProvider,
             "asr_mode": asrMode,
             "local_model": localModel,
-            "polish_enabled": polishEnabled ? "true" : "false",
+            "polish_mode": polishMode,
             "polish_type": polishType,
             "polish_api_url": polishApiUrl,
             "polish_model": polishModel,
+            "polish_reply_style": polishReplyStyle,
+            "translate_lang": translateLang,
             "hotkey": hotkey,
             "save_recordings": saveRecordings ? "true" : "false",
             "cjk_spacing": cjkSpacing ? "true" : "false",
         ]
+        // 预设列表单独编码成 JSON 字符串
+        if let llmData = try? JSONEncoder().encode(llmPresets),
+           let llmStr = String(data: llmData, encoding: .utf8) {
+            dict["llm_presets"] = llmStr
+        }
+        if let asrData = try? JSONEncoder().encode(asrPresets),
+           let asrStr = String(data: asrData, encoding: .utf8) {
+            dict["asr_presets"] = asrStr
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])
         else { return }
         let dir = (path as NSString).deletingLastPathComponent
@@ -267,5 +349,31 @@ extension AppConfig {
 
         try? lines.joined(separator: "\n").write(toFile: envPath, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: envPath)
+    }
+
+    /// 合并 LLM 预设：以当前内置默认为骨架，把磁盘里同名的 key/url/model 覆盖回去，
+    /// 再追加磁盘里的非内置历史条目。这样内置预设新增项能跟上版本，用户的 key 不丢。
+    private static func mergeLLMPresets(saved: [ProviderPreset]) -> [ProviderPreset] {
+        var result = ProviderPreset.defaultLLM
+        for i in result.indices {
+            if let s = saved.first(where: { $0.name == result[i].name && $0.isBuiltin }) {
+                result[i].apiUrl = s.apiUrl.isEmpty ? result[i].apiUrl : s.apiUrl
+                result[i].model = s.model.isEmpty ? result[i].model : s.model
+                result[i].apiKey = s.apiKey
+            }
+        }
+        // 用户自建历史条目
+        result.append(contentsOf: saved.filter { !$0.isBuiltin })
+        return result
+    }
+
+    private static func mergeASRPresets(saved: [AsrPreset]) -> [AsrPreset] {
+        var result = AsrPreset.defaultASR
+        for i in result.indices {
+            if let s = saved.first(where: { $0.provider == result[i].provider && $0.isBuiltin }) {
+                result[i].apiKey = s.apiKey
+            }
+        }
+        return result
     }
 }

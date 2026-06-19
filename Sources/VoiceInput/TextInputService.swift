@@ -32,20 +32,7 @@ struct TextInputService {
         let pb = NSPasteboard.general
 
         // 1. 保存当前剪贴板所有类型的数据（不只是 string，还有图片、文件、富文本等）
-        var savedItems: [[NSPasteboard.PasteboardType: Data]] = []
-        if let pasteboardItems = pb.pasteboardItems {
-            for item in pasteboardItems {
-                var itemData: [NSPasteboard.PasteboardType: Data] = [:]
-                for type in item.types {
-                    if let data = item.data(forType: type) {
-                        itemData[type] = data
-                    }
-                }
-                if !itemData.isEmpty {
-                    savedItems.append(itemData)
-                }
-            }
-        }
+        let savedItems = snapshotClipboard(pb)
 
         // 2. 写入新文本
         pb.clearContents()
@@ -79,6 +66,60 @@ struct TextInputService {
 
         // 6. 恢复原剪贴板
         restoreClipboard(pb, savedItems: savedItems)
+    }
+
+    /// 临时复制当前选区文本，并恢复用户原剪贴板。
+    /// 如果当前没有选区，则回退使用用户原剪贴板里的文本。
+    static func copySelectedText() throws -> String {
+        guard AXIsProcessTrusted() else { throw TextInputError.noAccessibilityPermission }
+
+        let pb = NSPasteboard.general
+        let fallbackText = pb.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let savedItems = snapshotClipboard(pb)
+
+        pb.clearContents()
+
+        let source = CGEventSource(stateID: .hidSystemState)
+        if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 8, keyDown: true) {
+            keyDown.flags = .maskCommand
+            keyDown.post(tap: .cghidEventTap)
+        }
+        if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 8, keyDown: false) {
+            keyUp.flags = .maskCommand
+            keyUp.post(tap: .cghidEventTap)
+        }
+
+        var copied = ""
+        for _ in 0..<8 {
+            usleep(50_000)
+            if let text = pb.string(forType: .string), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                copied = text
+                break
+            }
+        }
+
+        restoreClipboard(pb, savedItems: savedItems)
+        let trimmedCopied = copied.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedCopied.isEmpty ? fallbackText : trimmedCopied
+    }
+
+    private static func snapshotClipboard(_ pb: NSPasteboard) -> [[NSPasteboard.PasteboardType: Data]] {
+        var savedItems: [[NSPasteboard.PasteboardType: Data]] = []
+        if let pasteboardItems = pb.pasteboardItems {
+            for item in pasteboardItems {
+                var itemData: [NSPasteboard.PasteboardType: Data] = [:]
+                for type in item.types {
+                    if let data = item.data(forType: type) {
+                        itemData[type] = data
+                    }
+                }
+                if !itemData.isEmpty {
+                    savedItems.append(itemData)
+                }
+            }
+        }
+        return savedItems
     }
 
     /// 恢复剪贴板所有保存的类型

@@ -14,12 +14,14 @@ class AppState {
     var asrMode = "cloud"   // cloud, local
     var localModel = "sensevoice-small"
 
-    // 润色
-    var polishEnabled = true
+    // 润色模式：off 关闭 / polish 基本润色 / style 风格改写 / translate 翻译
+    var polishMode = "polish"
     var polishType = "cloud"
     var polishApiUrl = "https://api.deepseek.com/chat/completions"
     var polishApiKey = ""
     var polishModel = "deepseek-v4-flash"
+    var polishReplyStyle = "高情商"
+    var translateLang = "英文"
 
     // 通用
     var hotkey = "cmd_r"
@@ -27,6 +29,10 @@ class AppState {
     var saveRecordings = false
     var cjkSpacing = true
     var soundEnabled = true
+
+    // 服务商预设（含 key，用户要求持久化）
+    var llmPresets: [ProviderPreset] = ProviderPreset.defaultLLM
+    var asrPresets: [AsrPreset] = AsrPreset.defaultASR
 
     var isRecording = false
     var isProcessing = false
@@ -37,7 +43,10 @@ class AppState {
     let audioRecorder = AudioRecorder()
     let transcriber = Transcriber()  // 云端 DashScope
 
-    private init() { loadConfig() }
+    private init() {
+        loadConfig()
+        PromptManager.ensureDefaults()
+    }
 
     private func loadConfig() {
         let cfg = ConfigManager.shared.config
@@ -46,15 +55,19 @@ class AppState {
         asrApiKey = cfg.asrApiKey
         asrMode = cfg.asrMode
         localModel = cfg.localModel
-        polishEnabled = cfg.polishEnabled
+        polishMode = cfg.polishMode
         polishType = cfg.polishType
         polishApiUrl = cfg.polishApiUrl
         polishApiKey = cfg.polishApiKey
         polishModel = cfg.polishModel
+        polishReplyStyle = cfg.polishReplyStyle
+        translateLang = cfg.translateLang
         hotkey = cfg.hotkey
         saveRecordings = cfg.saveRecordings
         cjkSpacing = cfg.cjkSpacing
         soundEnabled = cfg.soundEnabled
+        llmPresets = cfg.llmPresets
+        asrPresets = cfg.asrPresets
         launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
@@ -253,6 +266,8 @@ class AppState {
         } catch {
             NSLog("[VI] 录音启动失败: \(error)")
             isRecording = false
+            recordingTimer?.invalidate()
+            recordingTimer = nil
             FloatingOverlay.shared.hide()
             statusText = "录音启动失败"
         }
@@ -260,14 +275,23 @@ class AppState {
 
     private var recordingStartTime: Date?
     private var recordingTimer: Timer?
+    private let maxRecordingDuration: TimeInterval = 120
 
     private func startTimer() {
         recordingStartTime = Date()
         recordingTimer?.invalidate()
         recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self = self, let start = self.recordingStartTime else { return }
-            let duration = Date().timeIntervalSince(start)
-            FloatingOverlay.shared.updateDuration(duration)
+            Task { @MainActor [weak self] in
+                guard let self = self, let start = self.recordingStartTime else { return }
+                let duration = Date().timeIntervalSince(start)
+                FloatingOverlay.shared.updateDuration(duration)
+
+                if duration >= self.maxRecordingDuration, self.isRecording {
+                    NSLog("[VI] 达到最长录音时长 \(Int(self.maxRecordingDuration)) 秒，自动结束录音")
+                    self.statusText = "达到最长录音时长，处理中..."
+                    self.stopRecordingAndProcess()
+                }
+            }
         }
     }
 
@@ -345,8 +369,10 @@ class AppState {
 
             NSLog("[VI] 识别结果: \(text.prefix(50))")
 
-            // 润色步骤：ASR 结果 → 润色 → 最终文本
-            if polishEnabled {
+            // 第一步：先润色/翻译（清口水词、纠同音错字），让后续命令词判断更准。
+            // polishMode: off 原样 / polish 润色 / translate 翻译
+            switch polishMode {
+            case "polish":
                 do {
                     let polished = try await TextPolisher().polish(
                         text: text, apiKey: polishApiKey,
@@ -357,6 +383,27 @@ class AppState {
                 } catch {
                     NSLog("[VI] 润色失败，使用原始文本: \(error)")
                 }
+            case "translate":
+                do {
+                    let translated = try await TextPolisher().translate(
+                        text: text, lang: translateLang,
+                        apiKey: polishApiKey, model: polishModel, apiUrl: polishApiUrl
+                    )
+                    NSLog("[VI] 翻译结果: \(translated.prefix(50))")
+                    text = translated
+                } catch {
+                    NSLog("[VI] 翻译失败，使用原始文本: \(error)")
+                }
+            default:
+                break // off：原样
+            }
+
+            // 第二步：润色后再判断是不是「帮我回复」命令
+            switch VoiceCommandParser.parse(text) {
+            case .normal:
+                break // 普通文本，直接用（已润色）的 text
+            case .reply(let intent):
+                text = (try? await regenerateReply(intent: intent)) ?? text
             }
 
             guard isProcessing else {
@@ -411,6 +458,27 @@ class AppState {
         }
     }
 
+    // MARK: - 帮我回复
+
+    /// 复制当前选区作为聊天上下文，调 LLM 生成真人风格回复。
+    /// 选区空则回退用剪贴板里的内容。失败返回 nil（上层走兜底）。
+    private func regenerateReply(intent: String) async throws -> String {
+        // 复制当前选中的对方发言（选区空则用剪贴板）
+        let context = (try? TextInputService.copySelectedText()) ?? ""
+        NSLog("[VI] 回复上下文: \(context.prefix(50))")
+
+        let reply = try await TextPolisher().composeReply(
+            context: context,
+            intent: intent,
+            style: polishReplyStyle,
+            apiKey: polishApiKey,
+            model: polishModel,
+            apiUrl: polishApiUrl
+        )
+        NSLog("[VI] 回复结果: \(reply.prefix(50))")
+        return reply
+    }
+
     // MARK: - 取消
 
     func cancelRecording() {
@@ -442,15 +510,19 @@ class AppState {
         cfg.asrApiKey = asrApiKey
         cfg.asrMode = asrMode
         cfg.localModel = localModel
-        cfg.polishEnabled = polishEnabled
+        cfg.polishMode = polishMode
         cfg.polishType = polishType
         cfg.polishApiUrl = polishApiUrl
         cfg.polishApiKey = polishApiKey
         cfg.polishModel = polishModel
+        cfg.polishReplyStyle = polishReplyStyle
+        cfg.translateLang = translateLang
         cfg.hotkey = hotkey
         cfg.saveRecordings = saveRecordings
         cfg.cjkSpacing = cjkSpacing
         cfg.soundEnabled = soundEnabled
+        cfg.llmPresets = llmPresets
+        cfg.asrPresets = asrPresets
         ConfigManager.shared.config = cfg
         ConfigManager.shared.save()
 
@@ -470,19 +542,60 @@ class AppState {
         hotkeyManager.updateHotkey(hotkey)
     }
 
+    /// 状态栏菜单「开机自启」勾选项：勾选立即注册 SMAppService，取消立即注销，并同步到 launchAtLogin / 配置。
+    @MainActor
+    func toggleLaunchAtLoginFromMenu() {
+        let target = !launchAtLogin
+        if target {
+            do {
+                try SMAppService.mainApp.register()
+                launchAtLogin = true
+            } catch {
+                NSLog("[VI] 开机自启注册失败: \(error)")
+                ClipboardHelper.notify(title: "语音输入", message: "开机自启设置失败：\(error.localizedDescription)")
+            }
+        } else {
+            do {
+                try SMAppService.mainApp.unregister()
+                launchAtLogin = false
+            } catch {
+                NSLog("[VI] 开机自启注销失败: \(error)")
+            }
+        }
+        // 持久化（复用 saveConfig 里的逻辑）
+        var cfg = ConfigManager.shared.config
+        cfg.hotkey = hotkey
+        cfg.saveRecordings = saveRecordings
+        cfg.cjkSpacing = cjkSpacing
+        cfg.soundEnabled = soundEnabled
+        cfg.polishMode = polishMode
+        cfg.polishType = polishType
+        cfg.polishApiUrl = polishApiUrl
+        cfg.polishModel = polishModel
+        cfg.polishReplyStyle = polishReplyStyle
+        cfg.translateLang = translateLang
+        cfg.asrMode = asrMode
+        cfg.asrProvider = asrProvider
+        cfg.localModel = localModel
+        cfg.llmPresets = llmPresets
+        cfg.asrPresets = asrPresets
+        ConfigManager.shared.config = cfg
+        ConfigManager.shared.save()
+    }
+
     // MARK: - 引导配置
 
     /// 从引导向导写入配置
     func applyOnboardingConfig(
         hotkey: String, asrMode: String, asrApiKey: String,
-        localModel: String, polishEnabled: Bool, polishApiKey: String,
+        localModel: String, polishMode: String, polishApiKey: String,
         polishApiUrl: String, polishModel: String
     ) {
         self.hotkey = hotkey
         self.asrMode = asrMode
         self.asrApiKey = asrApiKey
         self.localModel = localModel
-        self.polishEnabled = polishEnabled
+        self.polishMode = polishMode
         self.polishApiKey = polishApiKey
         self.polishApiUrl = polishApiUrl
         self.polishModel = polishModel

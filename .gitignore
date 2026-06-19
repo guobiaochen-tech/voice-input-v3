@@ -1,7 +1,7 @@
 # Build
 .build/
 
-# App bundle & DMG
+# App bundle & DMG（app 通过 GitHub Release 分发，不进源码仓库）
 VoiceInput.app/
 *.dmg
 
@@ -13,15 +13,24 @@ logo.icns
 *.bak.jpg
 *.bak.png
 
-# Config & secrets
+# 运行时数据目录（含用户 API Key，绝对不能提交）
+.voice-input/
+
+# 配置与密钥（即便单独出现也要排除）
 config.json
 .env
 
-# User data
+# 用户数据
 recordings/
 
-# Logs
+# 日志
 *.log
+
+# 开发测试与草稿（不进公开仓库）
+.test-prompts/
+测试结果*.md
+问题.md
+风格提示词改进草案.md
 
 # macOS
 .DS_Store

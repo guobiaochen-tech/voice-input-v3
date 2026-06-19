@@ -1,5 +1,54 @@
 import SwiftUI
 
+// MARK: - 文件夹式标签页形状：选中标签只画上/左/右边，下边与内容区连成一体。
+
+struct TabTopShape: Shape {
+    var radius: CGFloat = 6
+    func path(in rect: CGRect) -> Path {
+        let r = min(radius, rect.width / 2, rect.height / 2)
+        var path = Path()
+        // 从左上（圆角起点）顺时针：左上圆角 → 顶部直线 → 右上圆角 → 右下直角 → 左下直角 → 闭合
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY + r))
+        path.addArc(center: CGPoint(x: rect.minX + r, y: rect.minY + r),
+                    radius: r, startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
+        path.addLine(to: CGPoint(x: rect.maxX - r, y: rect.minY))
+        path.addArc(center: CGPoint(x: rect.maxX - r, y: rect.minY + r),
+                    radius: r, startAngle: .degrees(270), endAngle: .degrees(0), clockwise: false)
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+struct TabTopBorderShape: Shape {
+    var radius: CGFloat = 6
+    func path(in rect: CGRect) -> Path {
+        let r = min(radius, rect.width / 2, rect.height / 2)
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + r))
+        path.addArc(center: CGPoint(x: rect.minX + r, y: rect.minY + r),
+                    radius: r, startAngle: .degrees(180), endAngle: .degrees(270), clockwise: false)
+        path.addLine(to: CGPoint(x: rect.maxX - r, y: rect.minY))
+        path.addArc(center: CGPoint(x: rect.maxX - r, y: rect.minY + r),
+                    radius: r, startAngle: .degrees(270), endAngle: .degrees(0), clockwise: false)
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        return path
+    }
+}
+
+struct PanelSideBottomBorderShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        return path
+    }
+}
+
 // MARK: - 原生下拉框（从 v2 保留）
 
 struct PopupButton: NSViewRepresentable {
@@ -136,8 +185,12 @@ struct HotkeyRecorder: NSViewRepresentable {
 }
 
 class RecorderView: NSView {
-    var hotkeyName: String = "cmd_r"
-    var isRecording = false
+    var hotkeyName: String = "cmd_r" {
+        didSet { updateDisplay() }
+    }
+    var isRecording = false {
+        didSet { updateDisplay() }
+    }
     var onKeyCaptured: ((String) -> Void)?
 
     private var heldModifiers: Set<String> = []
@@ -149,7 +202,64 @@ class RecorderView: NSView {
     private var dotTimer: Timer?
     private let modifierKeyCodes: Set<UInt16> = [56, 60, 59, 62, 58, 61, 55, 54, 63]
 
+    /// 仅承载文字显示（无边框无背景，底色和边框由父 view 的 draw() 统一画，
+    /// 用 #222628 与模型页 .roundedBorder TextField 内部一致）。
+    private let displayField: NSTextField = {
+        let f = NSTextField()
+        f.isBordered = false
+        f.bezelStyle = .roundedBezel
+        f.isEditable = false
+        f.isSelectable = false
+        f.drawsBackground = false
+        f.alignment = .center
+        f.font = .systemFont(ofSize: 13)
+        f.textColor = .labelColor
+        f.usesSingleLineMode = true
+        f.cell?.truncatesLastVisibleLine = true
+        f.cell?.wraps = false
+        return f
+    }()
+
     override var acceptsFirstResponder: Bool { true }
+    override var isOpaque: Bool { false }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(displayField)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        // NSTextField 对中文字符的垂直基线计算会偏移，导致「右 Command」这类文本上下不居中。
+        // 这里把文本框高度收紧到字体实际行高，再在容器内垂直居中，保证显示对齐。
+        let font = displayField.font ?? NSFont.systemFont(ofSize: 13)
+        let lineHeight = ceil(font.boundingRectForFont.height)
+        let h = min(lineHeight, bounds.height)
+        let y = bounds.minY + round((bounds.height - h) / 2)
+        displayField.frame = NSRect(x: bounds.minX, y: y, width: bounds.width, height: h)
+    }
+
+    /// 录制态高亮环（边框）需要重绘时调用
+    private func updateDisplay() {
+        let text: String
+        let color: NSColor
+        if isRecording && !comboDisplay.isEmpty {
+            text = comboDisplay; color = .labelColor
+        } else if isRecording {
+            text = "请输入快捷键，再次点击退出" + String(repeating: ".", count: dotCount); color = .placeholderTextColor
+        } else {
+            text = hotkeyDisplayName(hotkeyName); color = .labelColor
+        }
+        displayField.stringValue = text
+        displayField.textColor = color
+        needsDisplay = true
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        updateDisplay()
+    }
 
     private func startDotAnimation() {
         dotCount = 1
@@ -157,7 +267,7 @@ class RecorderView: NSView {
         dotTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.dotCount = (self.dotCount % 3) + 1
-            self.needsDisplay = true
+            self.updateDisplay()
         }
     }
 
@@ -188,26 +298,14 @@ class RecorderView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        NSColor.controlBackgroundColor.setFill()
+        // 填充与模型页 .roundedBorder TextField 内部一致的底色（实测 #222628）
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 4, yRadius: 4)
+        NSColor(srgbRed: 0x22/255, green: 0x26/255, blue: 0x28/255, alpha: 1).setFill()
         path.fill()
         let border: NSColor = isRecording ? .systemBlue : .separatorColor
         border.setStroke()
         path.lineWidth = isRecording ? 2 : 1
         path.stroke()
-
-        let text: String
-        let color: NSColor
-        if isRecording && !comboDisplay.isEmpty {
-            text = comboDisplay; color = .labelColor
-        } else if isRecording {
-            text = "请输入快捷键，再次点击退出" + String(repeating: ".", count: dotCount); color = .placeholderTextColor
-        } else {
-            text = hotkeyDisplayName(hotkeyName); color = .labelColor
-        }
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: color]
-        let sz = (text as NSString).size(withAttributes: attrs)
-        (text as NSString).draw(at: NSPoint(x: (bounds.width - sz.width) / 2, y: (bounds.height - sz.height) / 2), withAttributes: attrs)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -219,7 +317,6 @@ class RecorderView: NSView {
         heldModifiers = []; heldKeyCode = nil; lastComboConfig = nil; hadAnyPress = false
         startDotAnimation()
         window?.makeFirstResponder(self)
-        needsDisplay = true
     }
 
     override func keyDown(with event: NSEvent) {
@@ -229,7 +326,7 @@ class RecorderView: NSView {
         if !modifierKeyCodes.contains(event.keyCode) { heldKeyCode = event.keyCode }
         syncModifiers(event.modifierFlags)
         if let cfg = buildComboConfig() { lastComboConfig = cfg }
-        needsDisplay = true
+        updateDisplay()
     }
 
     override func keyUp(with event: NSEvent) {
@@ -250,7 +347,7 @@ class RecorderView: NSView {
                 lastComboConfig = m.configName; finalizeCapture(); return
             }
         }
-        needsDisplay = true
+        updateDisplay()
     }
 
     private func syncModifiers(_ flags: NSEvent.ModifierFlags) {
@@ -285,6 +382,7 @@ class RecorderView: NSView {
 
 struct SettingsView: View {
     @Environment(AppState.self) var appState
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var selectedTab: Int = 0
 
@@ -301,17 +399,38 @@ struct SettingsView: View {
     @State private var localModels: [String] = []
 
     // 润色
-    @State private var polishEnabled: Bool
+    @State private var polishMode: String
     @State private var polishType: String
     @State private var polishApiUrl: String
     @State private var polishApiKey: String
     @State private var polishModel: String
+    @State private var polishReplyStyle: String
+    @State private var translateLang: String
+    @State private var availableStyles: [String] = []
+    @State private var availableLangs: [String] = []
+
+    // 预设（LLM / 云端 ASR）
+    @State private var llmPresets: [ProviderPreset]
+    @State private var asrPresets: [AsrPreset]
+    @State private var selectedLLMPreset: String = "自定义"
+    @State private var selectedASRPreset: String = "阿里云 DashScope"
+
+    // 模型页：语音/润色 子页切换 + 检测到的可用模型
+    @State private var modelSubPage: Int = 0   // 0=语音模型 1=润色模型
+    @State private var availableLLMModels: [String]? = nil   // nil=未检测, []=检测为空, 有值=检测到的列表
+    @State private var llmModelFetching = false
 
     // 模型管理
     @State private var modelTestResults: [String: Bool?] = [:]  // nil=未测试, true=可用, false=不可用
     @State private var modelDownloading: String? = nil
     @State private var modelDownloadProgress: [String: (downloaded: Int64, total: Int64)] = [:]
     @State private var modelBenchmarkResults: [String: String] = [:]
+
+    // 测速结果
+    @State private var llmSpeedResults: [String: String] = [:]        // key=模型名
+    @State private var llmSpeedTesting = false
+    @State private var asrCloudSpeed: String? = nil
+    @State private var asrCloudTesting = false
 
     init() {
         let s = AppState.shared
@@ -322,11 +441,15 @@ struct SettingsView: View {
         _asrMode = State(initialValue: s.asrMode)
         _asrApiKey = State(initialValue: s.asrApiKey)
         _localModel = State(initialValue: s.localModel)
-        _polishEnabled = State(initialValue: s.polishEnabled)
+        _polishMode = State(initialValue: s.polishMode)
         _polishType = State(initialValue: s.polishType)
         _polishApiUrl = State(initialValue: s.polishApiUrl)
         _polishApiKey = State(initialValue: s.polishApiKey)
         _polishModel = State(initialValue: s.polishModel)
+        _polishReplyStyle = State(initialValue: s.polishReplyStyle)
+        _translateLang = State(initialValue: s.translateLang)
+        _llmPresets = State(initialValue: s.llmPresets)
+        _asrPresets = State(initialValue: s.asrPresets)
     }
 
     private var hasChanges: Bool {
@@ -337,97 +460,117 @@ struct SettingsView: View {
         asrMode != appState.asrMode ||
         asrApiKey != appState.asrApiKey ||
         localModel != appState.localModel ||
-        polishEnabled != appState.polishEnabled ||
+        polishMode != appState.polishMode ||
         polishType != appState.polishType ||
         polishApiUrl != appState.polishApiUrl ||
         polishApiKey != appState.polishApiKey ||
-        polishModel != appState.polishModel
+        polishModel != appState.polishModel ||
+        polishReplyStyle != appState.polishReplyStyle ||
+        translateLang != appState.translateLang
     }
 
     var body: some View {
-        VStack(spacing: 8) {
-            // 顶部按钮栏
-            HStack {
-                if selectedTab == 2 {
-                    Toggle("启用润色", isOn: $polishEnabled)
+        VStack(spacing: 0) {
+            // 第一行：主导航（输入 / 模型）。距顶留出标题栏高度，
+            // 整体居中。
+            HStack(spacing: 0) {
+                Spacer()
+                mainTab(title: "输入", page: 0)
+                mainTab(title: "模型", page: 1)
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
+
+            // 第二行：子导航（仅模型页显示）+ 确认按钮（始终靠右）。
+            // 输入页此行只有 [确认]，保证确认按钮在三个页面像素级对齐。
+            HStack(spacing: 0) {
+                if selectedTab == 1 {
+                    modelSubTab(title: "语音模型", page: 0)
+                    modelSubTab(title: "润色模型", page: 1)
                 }
                 Spacer()
                 Button("确认") { save() }
                     .disabled(!hasChanges)
             }
             .padding(.horizontal, 20)
+            .padding(.bottom, 6)
 
-            TabView(selection: $selectedTab) {
-                basicTab
-                    .tabItem { Text("基础") }
-                    .tag(0)
+            // 主导航下方的分隔线，把导航区与内容区视觉切开
+            Divider()
+                .padding(.horizontal, 20)
 
-                asrTab
-                    .tabItem { Text("输入识别") }
-                    .tag(1)
-
-                polishTab
-                    .tabItem { Text("润色") }
-                    .tag(2)
-            }
-        }
-        .frame(width: 500)
-        .padding()
-        .onAppear {
-            refreshModelStatus()
-        }
-    }
-
-    // MARK: - 基础
-
-    private var basicTab: some View {
-        Form {
-            HStack {
-                Text("快捷键")
-                Spacer()
-                HotkeyRecorder(hotkey: $hotkey)
-                    .frame(width: 260, height: 28)
-            }
-
-            if let warning = KEY_CONFLICTS[hotkey] {
-                HStack {
-                    Spacer()
-                    Text(warning)
-                        .foregroundStyle(.red)
-                        .font(.caption)
+            // 内容区：根据主Tab和子Tab直接切换，不再用原生 TabView（避免系统 tab bar 位置不可控）
+            Group {
+                if selectedTab == 0 {
+                    polishTab
+                } else if modelSubPage == 0 {
+                    asrModelPanel
+                } else {
+                    llmModelPanel
                 }
             }
 
-            LabeledContent("开机自启动") {
-                Toggle("", isOn: $launchAtLogin)
-                    .toggleStyle(.switch)
-            }
-
-            LabeledContent("保存录音") {
-                Toggle("", isOn: $saveRecordings)
-                    .toggleStyle(.switch)
-            }
-
-            LabeledContent("提示音") {
-                Toggle("", isOn: $soundEnabled)
-                    .toggleStyle(.switch)
-            }
-
-            Divider()
-
-            HStack {
-                Spacer()
-                Text("Voice Input v3.3")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            // 底部版本/联系方式：贴在面板最底部，左右居中
+            Text("voice input V\(appVersion) · 1915199181@qq.com")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 4)
+                .padding(.bottom, 16)
         }
-        .formStyle(.grouped)
+        .frame(width: 500)
+        .padding(.horizontal)
+        .onAppear {
+            refreshModelStatus()
+            availableStyles = PromptManager.availableStyles()
+            availableLangs = PromptManager.availableTranslateLangs()
+            syncSelectedPresetsFromCurrent()
+        }
     }
 
-    // MARK: - 识别
+    /// 读取 App 版本号（来自 Info.plist 的 CFBundleVersion），用于底部信息展示
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "3.5"
+    }
 
-    private var asrTab: some View {
+    // MARK: - 自绘导航按钮（主Tab / 子Tab 共用样式：选中加粗 + 底部蓝条）
+
+    private func mainTab(title: String, page: Int) -> some View {
+        navTab(title: title, page: page, selection: selectedTab, isMain: true)
+    }
+
+    private func modelSubTab(title: String, page: Int) -> some View {
+        navTab(title: title, page: page, selection: modelSubPage, isMain: false)
+    }
+
+    private func navTab(title: String, page: Int, selection: Int, isMain: Bool) -> some View {
+        let isSelected = selection == page
+        return Button(action: {
+            if isMain { selectedTab = page } else { modelSubPage = page }
+        }) {
+            Text(title)
+                .font(.system(size: isMain ? 14 : 13, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(isSelected ? Color(nsColor: .labelColor) : Color(nsColor: .secondaryLabelColor))
+                .padding(.horizontal, 14)
+                .padding(.top, 5)
+                .padding(.bottom, 7)
+                .fixedSize(horizontal: true, vertical: false)
+                .background(alignment: .bottom) {
+                    if isSelected {
+                        Rectangle()
+                            .fill(Color(nsColor: .controlAccentColor))
+                            .frame(height: 2)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: 语音模型面板（云端 ASR 服务商 + 本地 ASR 模型）
+
+    private var asrModelPanel: some View {
         Form {
             LabeledContent("识别模式") {
                 PopupButton(
@@ -441,18 +584,55 @@ struct SettingsView: View {
             }
 
             if asrMode == "cloud" {
+                // 云端 ASR 服务商预设：选中自动填 key（各家协议后续接入）
+                LabeledContent("服务商") {
+                    Picker("", selection: $selectedASRPreset) {
+                        ForEach(asrPresets, id: \.name) { p in
+                            Text(p.name).tag(p.name)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(width: 260, alignment: .trailing)
+                    .onChange(of: selectedASRPreset) { oldName, newName in
+                        commitCurrentASRPreset(name: oldName)
+                        applyASRPreset(newName)
+                    }
+                }
+
                 LabeledContent("API Key") {
                     SecureField("", text: $asrApiKey)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 260)
                 }
 
-                HStack {
-                    Spacer()
-                    Text("请填入云端 ASR 服务的 API Key（支持阿里云、腾讯云、讯飞等）")
-                        .foregroundStyle(.secondary)
+                // 当前选中的服务商未接入时提示
+                if let cur = asrPresets.first(where: { $0.name == selectedASRPreset }), !cur.implemented {
+                    HStack {
+                        Spacer()
+                        Text("该服务商暂未接入，后续版本更新。当前仅阿里云 DashScope 可用。")
+                            .foregroundStyle(.orange)
+                            .font(.caption)
+                            .multilineTextAlignment(.trailing)
+                    }
+                }
+
+                // 连接测速：只测建连耗时（实时 ASR 对静音不产生结果，首字延时无法稳定测得）
+                LabeledContent("连接速度") {
+                    HStack(spacing: 8) {
+                        if let result = asrCloudSpeed {
+                            Text(result)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Button(asrCloudTesting ? "测速中…" : "测速") {
+                            runASRCloudSpeedTest()
+                        }
+                        .buttonStyle(.borderless)
                         .font(.caption)
-                        .multilineTextAlignment(.trailing)
+                        .disabled(asrApiKey.isEmpty || asrCloudTesting || !currentASRImplemented)
+                    }
+                    .frame(width: 260, alignment: .trailing)
                 }
             } else {
                 // 模型列表：点击已安装的行选中
@@ -489,15 +669,15 @@ struct SettingsView: View {
 
                             // 测试按钮
                             if downloaded || m.downloadBaseURL != nil {
-                                Button("测试") {
+                                Button("测速") {
                                     if downloaded {
                                         Task {
                                             modelTestResults[m.id] = nil
-                                            let result = LocalASRService.shared.benchmark(id: m.id)
-                                            modelTestResults[m.id] = result != nil ? true : false
-                                            // 用不同 key 存结果文字
-                                            if let r = result {
-                                                modelBenchmarkResults[m.id] = r
+                                            if let result = LocalASRService.shared.benchmarkResult(id: m.id) {
+                                                modelTestResults[m.id] = true
+                                                modelBenchmarkResults[m.id] = result.display
+                                            } else {
+                                                modelTestResults[m.id] = false
                                             }
                                         }
                                     } else {
@@ -584,40 +764,176 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
-    // MARK: - 润色
+    // MARK: 润色模型面板（LLM 服务商 + url/key/model + 检测/测速）
 
-    private var polishTab: some View {
+    private var llmModelPanel: some View {
         Form {
-            LabeledContent("模型来源") {
-                Text("云模型")
-                    .frame(width: 260, alignment: .trailing)
-                    .foregroundStyle(.secondary)
+            // LLM 服务商预设：选中自动填 url + model（+ key），切走前先落回当前 key
+            LabeledContent("服务商") {
+                Picker("", selection: $selectedLLMPreset) {
+                    ForEach(llmPresets, id: \.name) { p in
+                        Text(p.name).tag(p.name)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 260, alignment: .trailing)
+                .onChange(of: selectedLLMPreset) { oldName, newName in
+                    commitCurrentLLMPreset(name: oldName)
+                    applyLLMPreset(newName)
+                    // 换服务商后清空上次检测结果
+                    availableLLMModels = nil
+                }
             }
 
             LabeledContent("API 地址") {
                 TextField("", text: $polishApiUrl)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 260)
-                    .disabled(!polishEnabled)
             }
 
             LabeledContent("API Key") {
                 SecureField("", text: $polishApiKey)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 260)
-                    .disabled(!polishEnabled)
             }
 
+            // 模型名称：检测到列表则下拉可选，否则手填
             LabeledContent("模型名称") {
-                TextField("", text: $polishModel)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 260)
-                    .disabled(!polishEnabled)
+                if let models = availableLLMModels, !models.isEmpty {
+                    Picker("", selection: $polishModel) {
+                        ForEach(models, id: \.self) { Text($0).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(width: 260, alignment: .trailing)
+                } else {
+                    TextField("", text: $polishModel)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 260)
+                }
+            }
+
+            // 拉取：获取该 key 下的可用模型
+            LabeledContent {
+                HStack {
+                    if llmModelFetching {
+                        Text("获取中…").font(.caption).foregroundStyle(.secondary)
+                    } else if let models = availableLLMModels {
+                        Text(models.isEmpty ? "未获取到模型，请手填" : "已获取 \(models.count) 个模型")
+                            .font(.caption)
+                            .foregroundStyle(models.isEmpty ? .orange : .secondary)
+                    }
+                    Button(llmModelFetching ? "获取中…" : "获取模型列表") {
+                        runFetchModels()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .disabled(polishApiKey.isEmpty || polishApiUrl.isEmpty || llmModelFetching)
+                }
+                .frame(width: 260, alignment: .trailing)
+            } label: {
+                Text("拉取")
+            }
+
+            // 测速：发固定短问题，测 LLM 响应延迟
+            LabeledContent("响应速度") {
+                HStack {
+                    if let result = llmSpeedResults[polishModel] {
+                        Text(result)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button(llmSpeedTesting ? "测速中…" : "测速") {
+                        runLLMSpeedTest()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .disabled(polishApiKey.isEmpty || polishModel.isEmpty || llmSpeedTesting)
+                }
+                .frame(width: 260, alignment: .trailing)
             }
         }
         .formStyle(.grouped)
     }
 
+
+    // MARK: - 输入（处理流程：模式 / 风格 / 翻译语言；模型配置在「模型」Tab）
+
+    private var polishTab: some View {
+        Form {
+            LabeledContent("处理模式") {
+                Picker("", selection: $polishMode) {
+                    Text("关闭").tag("off")
+                    Text("润色").tag("polish")
+                    Text("翻译").tag("translate")
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 260, alignment: .trailing)
+            }
+
+            if polishMode != "off" {
+                LabeledContent("回复风格") {
+                    Picker("", selection: $polishReplyStyle) {
+                        ForEach(availableStyles, id: \.self) { Text($0).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(width: 260, alignment: .trailing)
+                }
+            }
+
+            if polishMode == "translate" {
+                LabeledContent("翻译语言") {
+                    Picker("", selection: $translateLang) {
+                        ForEach(availableLangs, id: \.self) { Text($0).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(width: 260, alignment: .trailing)
+                }
+            }
+
+            if polishMode == "off" {
+                HStack {
+                    Spacer()
+                    Text("关闭后语音直接转文字，不做润色/翻译。模型配置见「模型」页。")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+
+            // 下面是原「基础」设置，合并到此页底部
+            HStack {
+                Text("快捷键")
+                Spacer()
+                HotkeyRecorder(hotkey: $hotkey)
+                    .frame(width: 260, height: 28)
+            }
+
+            if let warning = KEY_CONFLICTS[hotkey] {
+                HStack {
+                    Spacer()
+                    Text(warning)
+                        .foregroundStyle(.red)
+                        .font(.caption)
+                }
+            }
+
+            LabeledContent("保存录音") {
+                Toggle("", isOn: $saveRecordings)
+                    .toggleStyle(.switch)
+            }
+
+            LabeledContent("提示音") {
+                Toggle("", isOn: $soundEnabled)
+                    .toggleStyle(.switch)
+            }
+        }
+        .formStyle(.grouped)
+    }
 
     // MARK: - 模型操作
 
@@ -638,15 +954,22 @@ struct SettingsView: View {
         appState.asrApiKey = asrApiKey
         appState.asrMode = asrMode
         appState.localModel = localModel
-        appState.polishEnabled = polishEnabled
+        appState.polishMode = polishMode
         appState.polishType = polishType
         appState.polishApiUrl = polishApiUrl
         appState.polishApiKey = polishApiKey
         appState.polishModel = polishModel
+        appState.polishReplyStyle = polishReplyStyle
+        appState.translateLang = translateLang
         appState.hotkey = hotkey
         appState.launchAtLogin = launchAtLogin
         appState.saveRecordings = saveRecordings
         appState.soundEnabled = soundEnabled
+        // 把当前填的值落回预设（保留每家 key），用户手填的新值会作为历史条目留存
+        commitLLMPreset()
+        commitASRPreset()
+        appState.llmPresets = llmPresets
+        appState.asrPresets = asrPresets
         appState.saveConfig()
         appState.updateHotkeyIfNeeded(old: oldHotkey)
         appState.reinitRecognizer()
@@ -657,5 +980,135 @@ struct SettingsView: View {
 
     private func closeWindow() {
         NSApp.keyWindow?.orderOut(nil)
+    }
+
+    // MARK: - 预设与测速辅助
+
+    /// 当前选中的云端 ASR 是否已接入（决定能否测速/使用）
+    private var currentASRImplemented: Bool {
+        asrPresets.first(where: { $0.name == selectedASRPreset })?.implemented ?? false
+    }
+
+    /// 启动时根据当前 url/model/key 反查选中了哪个 LLM 预设
+    private func syncSelectedPresetsFromCurrent() {
+        if let p = llmPresets.first(where: { $0.apiUrl == polishApiUrl && $0.model == polishModel }) {
+            selectedLLMPreset = p.name
+        } else if let p = llmPresets.first(where: { !$0.isBuiltin && ($0.apiUrl == polishApiUrl || $0.model == polishModel) }) {
+            selectedLLMPreset = p.name
+        } else {
+            selectedLLMPreset = "自定义"
+        }
+        if let p = asrPresets.first(where: { !$0.apiKey.isEmpty && $0.apiKey == asrApiKey }) {
+            selectedASRPreset = p.name
+        } else {
+            selectedASRPreset = "阿里云 DashScope"
+        }
+    }
+
+    /// 选中 LLM 预设 → 自动填 url + model + key（自定义则不覆盖）
+    private func applyLLMPreset(_ name: String) {
+        guard let p = llmPresets.first(where: { $0.name == name }) else { return }
+        if p.name != "自定义" {
+            if !p.apiUrl.isEmpty { polishApiUrl = p.apiUrl }
+            if !p.model.isEmpty { polishModel = p.model }
+            if !p.apiKey.isEmpty { polishApiKey = p.apiKey }
+        }
+    }
+
+    /// 选中云端 ASR 预设 → 自动填 key；未接入的服务商不允许实际使用
+    private func applyASRPreset(_ name: String) {
+        guard let p = asrPresets.first(where: { $0.name == name }) else { return }
+        if !p.apiKey.isEmpty { asrApiKey = p.apiKey }
+    }
+
+    /// 保存前把当前值写回预设：内置项更新 key，非内置项匹配不上则新增历史条目
+    private func commitLLMPreset() {
+        if let idx = llmPresets.firstIndex(where: { $0.name == selectedLLMPreset && $0.isBuiltin }) {
+            llmPresets[idx].apiUrl = polishApiUrl
+            llmPresets[idx].model = polishModel
+            llmPresets[idx].apiKey = polishApiKey
+        } else {
+            // 用户自建历史：若已有同名同 url 的就更新 key，否则追加
+            if let idx = llmPresets.firstIndex(where: { !$0.isBuiltin && $0.apiUrl == polishApiUrl && $0.model == polishModel }) {
+                llmPresets[idx].apiKey = polishApiKey
+            } else if !polishApiUrl.isEmpty || !polishModel.isEmpty {
+                llmPresets.append(ProviderPreset(name: "\(polishModel)", apiUrl: polishApiUrl, model: polishModel, apiKey: polishApiKey, isBuiltin: false))
+            }
+        }
+    }
+
+    private func commitASRPreset() {
+        if let idx = asrPresets.firstIndex(where: { $0.name == selectedASRPreset && $0.isBuiltin }) {
+            asrPresets[idx].apiKey = asrApiKey
+        }
+    }
+
+    /// 切走前把当前编辑中的值落回到「指定名字」的预设（保留每家 key）。
+    /// onChange(oldName, newName) 里先用它落回 oldName，再 apply newName。
+    private func commitCurrentLLMPreset(name: String) {
+        if let idx = llmPresets.firstIndex(where: { $0.name == name && $0.isBuiltin }) {
+            llmPresets[idx].apiUrl = polishApiUrl
+            llmPresets[idx].model = polishModel
+            llmPresets[idx].apiKey = polishApiKey
+        } else if let idx = llmPresets.firstIndex(where: { $0.name == name && !$0.isBuiltin }) {
+            llmPresets[idx].apiKey = polishApiKey
+        }
+    }
+
+    private func commitCurrentASRPreset(name: String) {
+        if let idx = asrPresets.firstIndex(where: { $0.name == name }) {
+            asrPresets[idx].apiKey = asrApiKey
+        }
+    }
+
+    // MARK: - 检测可用模型
+
+    private func runFetchModels() {
+        let key = polishApiKey, url = polishApiUrl
+        llmModelFetching = true
+        availableLLMModels = nil
+        Task {
+            let models = await TextPolisher.fetchAvailableModels(apiKey: key, apiUrl: url)
+            await MainActor.run {
+                llmModelFetching = false
+                availableLLMModels = models ?? []
+                // 若当前模型名不在列表里，且列表非空，选第一个
+                if let list = availableLLMModels, !list.isEmpty, !list.contains(polishModel) {
+                    polishModel = list.first ?? polishModel
+                }
+            }
+        }
+    }
+
+    // MARK: - 测速
+
+    private func runLLMSpeedTest() {
+        let key = polishApiKey, model = polishModel, url = polishApiUrl
+        llmSpeedTesting = true
+        Task {
+            let result = await TextPolisher().measureLatency(apiKey: key, model: model, apiUrl: url)
+            await MainActor.run {
+                llmSpeedTesting = false
+                llmSpeedResults[model] = result?.display ?? "测速失败（检查 Key/URL/模型名）"
+            }
+        }
+    }
+
+    private func runASRCloudSpeedTest() {
+        guard currentASRImplemented else { return }
+        let key = asrApiKey
+        asrCloudTesting = true
+        asrCloudSpeed = nil
+        Task {
+            let ms = await Transcriber().measureConnectionLatency(apiKey: key)
+            await MainActor.run {
+                asrCloudTesting = false
+                if let ms {
+                    asrCloudSpeed = "连接 \(ms)ms"
+                } else {
+                    asrCloudSpeed = "测速失败（检查网络/API Key）"
+                }
+            }
+        }
     }
 }

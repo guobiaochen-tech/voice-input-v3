@@ -540,7 +540,7 @@ struct OnboardingView: View {
             asrMode: asrMode,
             asrApiKey: asrApiKey,
             localModel: localModel,
-            polishEnabled: polishEnabled,
+            polishMode: polishEnabled ? "polish" : "off",
             polishApiKey: polishApiKey,
             polishApiUrl: polishApiUrl,
             polishModel: polishModel

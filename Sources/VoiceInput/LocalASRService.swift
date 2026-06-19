@@ -136,9 +136,21 @@ class LocalASRService {
 
     // MARK: - 性能测试
 
-    /// 测试指定模型的加载和推理速度
-    /// 返回 "加载Xms 推理Xms" 或 nil（失败）
-    func benchmark(id: String) -> String? {
+    /// 测速结果：加载耗时、推理耗时、RTF（推理耗时/音频时长，<1.0 即比实时快）
+    struct BenchmarkResult {
+        let loadMs: Int
+        let inferMs: Int
+        let rtf: Double          // realtime factor = inferMs / audioDurationMs
+        let audioDurationMs: Int
+
+        /// UI 展示用
+        var display: String {
+            String(format: "加载 %dms · 推理 %dms · RTF %.2f", loadMs, inferMs, rtf)
+        }
+    }
+
+    /// 测试指定模型的加载和推理速度，返回结构化结果
+    func benchmarkResult(id: String) -> BenchmarkResult? {
         #if SHERPA_ONNX
         // 保存当前状态
         let previousModel = MainActor.assumeIsolated { AppState.shared.localModel }
@@ -151,6 +163,7 @@ class LocalASRService {
             // 恢复
             unloadModel()
             MainActor.assumeIsolated { AppState.shared.localModel = previousModel }
+            if wasLoaded { try? loadModel() }
         }
 
         do {
@@ -171,8 +184,12 @@ class LocalASRService {
             let _ = try transcribe(samples: samples)
             let inferMs = Int(Date().timeIntervalSince(inferStart) * 1000)
 
-            NSLog("[VI-LASR] benchmark \(id): 加载\(loadMs)ms 推理\(inferMs)ms")
-            return "加载\(loadMs)ms 推理\(inferMs)ms"
+            // RTF = 推理耗时 / 音频时长（音频 2s = 2000ms）
+            let audioDurationMs = 2000
+            let rtf = Double(inferMs) / Double(audioDurationMs)
+
+            NSLog("[VI-LASR] benchmark \(id): 加载\(loadMs)ms 推理\(inferMs)ms RTF \(String(format: "%.2f", rtf))")
+            return BenchmarkResult(loadMs: loadMs, inferMs: inferMs, rtf: rtf, audioDurationMs: audioDurationMs)
         } catch {
             NSLog("[VI-LASR] benchmark \(id) 失败: \(error)")
             return nil
@@ -180,6 +197,12 @@ class LocalASRService {
         #else
         return nil
         #endif
+    }
+
+    /// 测试指定模型的加载和推理速度
+    /// 返回 "加载Xms 推理Xms" 或 nil（失败）。兼容旧调用。
+    func benchmark(id: String) -> String? {
+        benchmarkResult(id: id)?.display
     }
 
     // MARK: - 识别

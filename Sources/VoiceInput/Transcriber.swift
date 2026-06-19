@@ -185,6 +185,109 @@ class Transcriber: @unchecked Sendable {
 
     func reset() { cleanup() }
 
+    // MARK: - 连接测速
+
+    /// 测云端 ASR 连接速度：建连 → 发 run-task → 收到 task-started（连接耗时）即返回。
+    /// 说明：原实现用一段静音 PCM 等「首字延时」，但实时识别对纯静音不会产生结果，
+    /// 导致首字延时永远测不到、6 秒超时报失败。改为只测连接，连接耗时最能反映
+    /// 「服务通不通、快不快」。失败返回 nil。
+    func measureConnectionLatency(apiKey: String) async -> Int? {
+        guard !apiKey.isEmpty else { return nil }
+        cleanup()
+
+        let currentTaskId = UUID().uuidString.lowercased()
+        queue.sync { taskId = currentTaskId }
+
+        let url = URL(string: "wss://dashscope.aliyuncs.com/api-ws/v1/inference")!
+        var request = URLRequest(url: url)
+        request.setValue("bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        let session = URLSession(configuration: .default)
+        let wsTask = session.webSocketTask(with: request)
+        queue.sync { webSocketTask = wsTask }
+
+        // 计时起点：开始建连
+        let t0 = Date()
+
+        wsTask.resume()
+
+        let runTask: [String: Any] = [
+            "header": [
+                "task_id": currentTaskId,
+                "action": "run-task",
+                "streaming": "duplex"
+            ],
+            "payload": [
+                "task_group": "audio",
+                "task": "asr",
+                "function": "recognition",
+                "model": "paraformer-realtime-v2",
+                "parameters": [
+                    "sample_rate": 16000,
+                    "format": "pcm",
+                    "enable_inverse_text_normalization": true
+                ],
+                "input": [:]
+            ]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: runTask),
+              let jsonString = String(data: data, encoding: .utf8) else {
+            cleanup()
+            return nil
+        }
+
+        // continuation：收到 task-started 记连接耗时即返回，失败/超时返回 nil
+        let result = await withCheckedContinuation { (continuation: CheckedContinuation<Int?, Never>) in
+            var resumed = false
+            let resumeOnce: (Int?) -> Void = { ms in
+                guard !resumed else { return }
+                resumed = true
+                continuation.resume(returning: ms)
+            }
+
+            // 超时兜底：6 秒
+            DispatchQueue.global().asyncAfter(deadline: .now() + 6) { resumeOnce(nil) }
+
+            // 临时接收器：监听到 task-started 记连接耗时即返回
+            var receiveOnce: (() -> Void)!
+            receiveOnce = { [weak self] in
+                guard let self else { resumeOnce(nil); return }
+                self.webSocketTask?.receive { res in
+                    guard case .success(let msg) = res else { resumeOnce(nil); return }
+                    let text: String?
+                    switch msg {
+                    case .string(let s): text = s
+                    case .data(let d): text = String(data: d, encoding: .utf8)
+                    default: text = nil
+                    }
+                    guard let text, let payload = text.data(using: .utf8),
+                          let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+                          let header = json["header"] as? [String: Any],
+                          let event = header["event"] as? String else {
+                        receiveOnce(); return
+                    }
+                    switch event {
+                    case "task-started":
+                        // 连接成功：建连到 task-started 的耗时
+                        resumeOnce(Int(Date().timeIntervalSince(t0) * 1000))
+                    case "task-failed":
+                        resumeOnce(nil)
+                    default:
+                        receiveOnce()
+                    }
+                }
+            }
+
+            wsTask.send(.string(jsonString)) { err in
+                if err != nil { resumeOnce(nil) }
+            }
+            receiveOnce()
+        }
+
+        cleanup()
+        return result
+    }
+
     /// 线程安全地 resume continuation（只生效一次）
     private func resumeContinuation(with result: String?) {
         queue.sync {

@@ -141,7 +141,7 @@ cat > "$CONTENTS/Info.plist" << 'EOF'
     <key>CFBundleName</key>
     <string>Voice Input</string>
     <key>CFBundleVersion</key>
-    <string>3.3</string>
+    <string>3.5</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -170,7 +170,7 @@ codesign --verify --deep --strict "$APP_DIR"
 echo "✅ 打包完成: $APP_DIR"
 
 # === 7. DMG 打包 ===
-DMG_NAME="VoiceInput-3.3.dmg"
+DMG_NAME="VoiceInput-3.5.dmg"
 DMG_STAGING="dmg_staging"
 
 echo "📦 正在打包 DMG..."

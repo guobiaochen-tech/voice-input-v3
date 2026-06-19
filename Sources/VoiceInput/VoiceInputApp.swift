@@ -18,6 +18,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         setupMainMenu()
+        // 默认提示词 md 与权限无关，启动即生成（不依赖 AppState 初始化时机）
+        PromptManager.ensureDefaults()
 
         if PermissionChecker.allGranted {
             proceedAfterPermission()
@@ -86,6 +88,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             _ = AppState.shared.isRecording
             _ = AppState.shared.isProcessing
             _ = AppState.shared.statusText
+            _ = AppState.shared.hotkey
+            _ = AppState.shared.asrMode
+            _ = AppState.shared.polishMode
+            _ = AppState.shared.polishModel
+            _ = AppState.shared.translateLang
+            _ = AppState.shared.launchAtLogin
         } onChange: { [weak self] in
             Task { @MainActor in self?.updateStatusItem() }
         }
@@ -100,27 +108,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         let state = AppState.shared
 
-        // 状态
-        let statusText: String
-        if state.isRecording {
-            statusText = "录音中..."
-        } else if state.isProcessing {
-            statusText = "处理中..."
-        } else {
-            statusText = state.statusText
+        // 动态状态：录音/处理中才显示，就绪时不显示状态文字
+        if state.isRecording || state.isProcessing {
+            let statusText = state.isRecording ? "录音中..." : "处理中..."
+            let statusMenuItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
+            statusMenuItem.isEnabled = false
+            menu.addItem(statusMenuItem)
         }
 
-        let statusMenuItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
-        statusMenuItem.isEnabled = false
-        menu.addItem(statusMenuItem)
+        // 快捷键
+        let hkDisplay = HOTKEY_DISPLAY[state.hotkey] ?? state.hotkey.uppercased()
+        let hkItem = NSMenuItem(title: "快捷键: \(hkDisplay)", action: nil, keyEquivalent: "")
+        hkItem.isEnabled = false
+        menu.addItem(hkItem)
 
-        // ASR 模式
-        let modeText = state.asrMode == "local" ? "本地识别" : "云端识别"
-        let modeItem = NSMenuItem(title: "模式: \(modeText)", action: nil, keyEquivalent: "")
-        modeItem.isEnabled = false
-        menu.addItem(modeItem)
+        // 识别模型：(本地 / 阿里云)
+        let asrDisplay: String
+        if state.asrMode == "local" {
+            asrDisplay = "本地"
+        } else {
+            asrDisplay = "阿里云"
+        }
+        let asrItem = NSMenuItem(title: "识别模型: \(asrDisplay)", action: nil, keyEquivalent: "")
+        asrItem.isEnabled = false
+        menu.addItem(asrItem)
+
+        // 润色模型：(关闭 / kimi 等)
+        let polishDisplay: String
+        switch state.polishMode {
+        case "off": polishDisplay = "关闭"
+        case "translate": polishDisplay = "翻译(\(state.translateLang))"
+        default: polishDisplay = state.polishModel.isEmpty ? "润色" : state.polishModel
+        }
+        let polishItem = NSMenuItem(title: "润色模型: \(polishDisplay)", action: nil, keyEquivalent: "")
+        polishItem.isEnabled = false
+        menu.addItem(polishItem)
 
         menu.addItem(.separator())
+
+        // 开机自启（勾选在文字左边）：勾选立即注册 SMAppService，取消立即注销
+        let launchItem = NSMenuItem(title: "开机自启", action: #selector(toggleLaunchAtLogin(_:)), keyEquivalent: "")
+        launchItem.target = self
+        launchItem.state = state.launchAtLogin ? .on : .off
+        menu.addItem(launchItem)
+
         menu.addItem(NSMenuItem(title: "设置...", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出", action: #selector(quitApp), keyEquivalent: "q"))
@@ -136,12 +167,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let view = SettingsView().environment(AppState.shared)
         let panel = NSPanel(
-            contentRect: NSMakeRect(0, 0, 540, 280),
+            contentRect: NSMakeRect(0, 0, 532, 390),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        panel.title = "语音输入设置"
+        panel.title = "Voice Input 语音输入设置"
         panel.isReleasedWhenClosed = false
         panel.contentView = NSHostingView(rootView: view)
         panel.center()
@@ -149,6 +180,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
 
         settingsPanel = panel
+    }
+
+    @objc private func toggleLaunchAtLogin(_ sender: NSMenuItem) {
+        AppState.shared.toggleLaunchAtLoginFromMenu()
+        sender.state = AppState.shared.launchAtLogin ? .on : .off
     }
 
     @objc private func quitApp() {
